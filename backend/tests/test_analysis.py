@@ -426,3 +426,98 @@ def test_caching_behavior():
         res2 = fetch_fuelhh_actuals("2026-01", refresh=False)
         assert len(res2) == 1
         assert mock_get.call_count == 1  # No additional network call
+
+
+def test_autumn_clock_change_forecast_period_keys():
+    """
+    On 26 October 2025 (UK clock fallback from BST to GMT), ensure that
+    hourly forecast expansion in UTC produces distinct half-hour keys
+    and does not map SP 6 (01:30 GMT) back to SP 4 (00:30 UTC / 01:30 BST fold=0).
+    """
+    # 00:00 UTC (01:00 BST) -> covers 00:00 UTC (SP 3) and 00:30 UTC (SP 4)
+    fc_0000 = datetime(2025, 10, 26, 0, 0, tzinfo=UTC)
+    keys_0000 = forecast_period_keys(fc_0000)
+    assert keys_0000 == [
+        "2025-10-26T00:00:00+00:00",
+        "2025-10-26T00:30:00+00:00",
+    ]
+
+    # 01:00 UTC (01:00 GMT fold=1) -> covers 01:00 UTC (SP 5) and 01:30 UTC (SP 6)
+    fc_0100 = datetime(2025, 10, 26, 1, 0, tzinfo=UTC)
+    keys_0100 = forecast_period_keys(fc_0100)
+    assert keys_0100 == [
+        "2025-10-26T01:00:00+00:00",
+        "2025-10-26T01:30:00+00:00",
+    ]
+    # Ensure disjoint sets of delivery intervals
+    assert set(keys_0000).isdisjoint(set(keys_0100))
+
+
+def test_october_clock_change_matching_and_no_missing_intervals():
+    """
+    Verify full matching across the 50-settlement-period autumn clock change day (26 Oct 2025).
+    Ensure SP 4, SP 5, and SP 6 all receive their respective forecast vintages without data loss.
+    """
+    actuals = [
+        # SP 4: 00:30 UTC (01:30 BST)
+        {"fuelType": "WIND", "startTime": "2025-10-26T00:30:00Z", "publishTime": "2025-10-26T01:00:00Z", "generation": 15599, "settlementPeriod": 4, "settlementDate": "2025-10-26"},
+        # SP 5: 01:00 UTC (01:00 GMT)
+        {"fuelType": "WIND", "startTime": "2025-10-26T01:00:00Z", "publishTime": "2025-10-26T01:30:00Z", "generation": 15189, "settlementPeriod": 5, "settlementDate": "2025-10-26"},
+        # SP 6: 01:30 UTC (01:30 GMT)
+        {"fuelType": "WIND", "startTime": "2025-10-26T01:30:00Z", "publishTime": "2025-10-26T02:00:00Z", "generation": 15225, "settlementPeriod": 6, "settlementDate": "2025-10-26"},
+    ]
+    forecasts = [
+        # 00:00 UTC forecast (covers SP 3 & 4)
+        {"startTime": "2025-10-26T00:00:00Z", "publishTime": "2025-10-25T08:30:00Z", "generation": 19932},
+        # 01:00 UTC forecast (covers SP 5 & 6)
+        {"startTime": "2025-10-26T01:00:00Z", "publishTime": "2025-10-25T08:30:00Z", "generation": 19761},
+    ]
+
+    res = calculate_analysis(actuals, forecasts, cutoff_hour=10, month="2025-10")
+    rows_by_sp = {r["settlementPeriod"]: r for r in res["rows"] if r["settlementDate"] == "2025-10-26" and r["actualMW"] is not None}
+
+    # Verify SP 4
+    assert rows_by_sp[4]["actualMW"] == 15599
+    assert rows_by_sp[4]["forecastMW"] == 19932
+    assert rows_by_sp[4]["errorMW"] == 19932 - 15599
+
+    # Verify SP 5
+    assert rows_by_sp[5]["actualMW"] == 15189
+    assert rows_by_sp[5]["forecastMW"] == 19761
+    assert rows_by_sp[5]["errorMW"] == 19761 - 15189
+
+    # Verify SP 6 (was previously missing due to local arithmetic fold bug)
+    assert rows_by_sp[6]["actualMW"] == 15225
+    assert rows_by_sp[6]["forecastMW"] == 19761
+    assert rows_by_sp[6]["errorMW"] == 19761 - 15225
+    assert rows_by_sp[6]["publishTime"] == "2025-10-25T08:30:00+00:00"
+
+
+def test_cutoff_differentiation_between_12_and_16():
+    """
+    Verify that cutoff 12:00 and cutoff 16:00 select different forecast vintages
+    when a new forecast is published between 12:00 and 16:00 UK on D-1.
+    """
+    actuals = [
+        {"fuelType": "WIND", "startTime": "2025-10-15T12:00:00Z", "publishTime": "2025-10-15T13:00:00Z", "generation": 8000, "settlementDate": "2025-10-15"}
+    ]
+    forecasts = [
+        # Published at 10:30 UTC (before 12:00 UK cutoff, which is 11:00 UTC in BST)
+        {"startTime": "2025-10-15T12:00:00Z", "publishTime": "2025-10-14T10:30:00Z", "generation": 7500},
+        # Published at 12:30 UTC (after 12:00 UK cutoff, but before 16:00 UK cutoff which is 15:00 UTC in BST)
+        {"startTime": "2025-10-15T12:00:00Z", "publishTime": "2025-10-14T12:30:00Z", "generation": 7800},
+    ]
+
+    res_12 = calculate_analysis(actuals, forecasts, cutoff_hour=12, month="2025-10")
+    row_12 = next(r for r in res_12["rows"] if r["startTime"] == "2025-10-15T12:00:00+00:00")
+    assert row_12["forecastMW"] == 7500
+    assert row_12["publishTime"] == "2025-10-14T10:30:00+00:00"
+
+    res_16 = calculate_analysis(actuals, forecasts, cutoff_hour=16, month="2025-10")
+    row_16 = next(r for r in res_16["rows"] if r["startTime"] == "2025-10-15T12:00:00+00:00")
+    assert row_16["forecastMW"] == 7800
+    assert row_16["publishTime"] == "2025-10-14T12:30:00+00:00"
+
+    # Confirm metrics differ
+    assert res_12["metrics"]["maeMW"] != res_16["metrics"]["maeMW"]
+

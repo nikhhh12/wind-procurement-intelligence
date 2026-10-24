@@ -147,13 +147,17 @@ def forecast_period_keys(
     two half-hour delivery intervals within that hour.
 
     A forecast timestamp on the half-hour is retained as that interval.
+
+    Arithmetic is performed in UTC to preserve continuous 30-minute steps
+    and avoid fold/daylight-saving ambiguities during clock change transitions
+    (such as the autumn clock-fallback where local wall-clock times repeat).
     """
-    local_start = forecast_start.astimezone(LONDON)
+    utc_start = forecast_start.astimezone(UTC)
 
-    if local_start.minute == 30:
-        return [utc_key(forecast_start)]
+    if utc_start.minute == 30:
+        return [utc_key(utc_start)]
 
-    hour_start = local_start.replace(
+    hour_start = utc_start.replace(
         minute=0,
         second=0,
         microsecond=0,
