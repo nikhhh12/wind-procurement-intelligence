@@ -313,15 +313,92 @@ def test_upstream_malformed_response():
 
 
 def test_query_parameter_validation():
-    """FastAPI rejects invalid month and cutoff_hour parameters with 422."""
-    resp1 = client.get("/api/analysis?month=2026-02&cutoff_hour=10")
+    """FastAPI rejects invalid month pattern and cutoff_hour parameters with 422."""
+    resp1 = client.get("/api/analysis?month=not-a-month&cutoff_hour=10")
     assert resp1.status_code == 422
 
-    resp2 = client.get("/api/analysis?cutoff_hour=25")
+    resp2 = client.get("/api/analysis?month=2026-13&cutoff_hour=10")
     assert resp2.status_code == 422
 
-    resp3 = client.get("/api/analysis?cutoff_hour=-1")
+    resp3 = client.get("/api/analysis?cutoff_hour=25")
     assert resp3.status_code == 422
+
+    resp4 = client.get("/api/analysis?cutoff_hour=-1")
+    assert resp4.status_code == 422
+
+
+def test_supported_months_endpoint():
+    """GET /api/supported-months returns supported delivery months and default."""
+    resp = client.get("/api/supported-months")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "supportedMonths" in data
+    assert "defaultMonth" in data
+    assert data["defaultMonth"] == "2026-01"
+    assert "2026-01" in data["supportedMonths"]
+    assert "2025-12" in data["supportedMonths"]
+    assert "2026-02" in data["supportedMonths"]
+
+
+def test_unsupported_month_rejection():
+    """GET /api/analysis with an unsupported month returns HTTP 400 with detail."""
+    resp = client.get("/api/analysis?month=2030-01&cutoff_hour=10")
+    assert resp.status_code == 400
+    assert "not currently supported" in resp.json()["detail"]
+
+
+def test_february_2026_grid_calculation():
+    """February 2026 has 28 days = 1,344 half-hourly settlement periods."""
+    result = calculate_analysis([], [], cutoff_hour=10, month="2026-02")
+    assert result["month"] == "2026-02"
+    assert len(result["rows"]) == 1344
+    assert result["counts"]["expectedPeriods"] == 1344
+    assert result["rows"][0]["settlementDate"] == "2026-02-01"
+    assert result["rows"][-1]["settlementDate"] == "2026-02-28"
+    assert "February 2026" in result["methodology"]
+
+
+def test_december_2025_grid_calculation():
+    """December 2025 has 31 days = 1,488 half-hourly settlement periods."""
+    result = calculate_analysis([], [], cutoff_hour=10, month="2025-12")
+    assert result["month"] == "2025-12"
+    assert len(result["rows"]) == 1488
+    assert result["counts"]["expectedPeriods"] == 1488
+    assert result["rows"][0]["settlementDate"] == "2025-12-01"
+    assert result["rows"][-1]["settlementDate"] == "2025-12-31"
+    assert "December 2025" in result["methodology"]
+
+
+def test_month_selection_cutoff_continuity():
+    """D-1 cutoff logic continues to function seamlessly across month transitions."""
+    # Delivery on Feb 1, 2026 at 00:00 UTC -> Cutoff is Jan 31, 2026 at 10:00 UTC
+    delivery = datetime(2026, 2, 1, 0, 0, tzinfo=UTC)
+    cutoff = cutoff_for_delivery(delivery, cutoff_hour=10)
+    assert cutoff == datetime(2026, 1, 31, 10, 0, tzinfo=UTC)
+
+    # Forecast published before cutoff on Jan 31 is accepted
+    forecasts = [
+        {
+            "startTime": "2026-02-01T00:00:00Z",
+            "publishTime": "2026-01-31T09:30:00Z",
+            "generation": 8200,
+        }
+    ]
+    actuals = [
+        {
+            "fuelType": "WIND",
+            "startTime": "2026-02-01T00:00:00Z",
+            "publishTime": "2026-02-01T00:30:00Z",
+            "generation": 7900,
+        }
+    ]
+    res = calculate_analysis(actuals, forecasts, cutoff_hour=10, month="2026-02")
+    feb1_sp1 = res["rows"][0]
+    assert feb1_sp1["settlementDate"] == "2026-02-01"
+    assert feb1_sp1["settlementPeriod"] == 1
+    assert feb1_sp1["forecastMW"] == 8200
+    assert feb1_sp1["actualMW"] == 7900
+    assert feb1_sp1["errorMW"] == 300
 
 
 def test_caching_behavior():

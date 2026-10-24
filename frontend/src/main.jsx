@@ -9,6 +9,15 @@ const fmt = (n, digits = 0) => n == null || !Number.isFinite(Number(n)) ? '—' 
 const dateLabel = (d) => new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
 
 function App() {
+  const [month, setMonth] = useState('2026-01');
+  const [supportedMonths, setSupportedMonths] = useState([
+    '2025-10',
+    '2025-11',
+    '2025-12',
+    '2026-01',
+    '2026-02',
+    '2026-03',
+  ]);
   const [cutoff, setCutoff] = useState('10');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -25,12 +34,34 @@ function App() {
   // Overview settlement review toggle
   const [showAllOverviewRows, setShowAllOverviewRows] = useState(false);
 
-  const load = async (forceRefresh = false) => {
+  const activeRequestId = React.useRef(0);
+
+  // Fetch supported delivery months on mount
+  useEffect(() => {
+    let isMounted = true;
+    fetch(`${API}/api/supported-months`)
+      .then(r => r.ok ? r.json() : null)
+      .then(res => {
+        if (isMounted && res?.supportedMonths?.length) {
+          setSupportedMonths(res.supportedMonths);
+        }
+      })
+      .catch(() => {});
+    return () => { isMounted = false; };
+  }, []);
+
+  const load = async (targetMonth = month, targetCutoff = cutoff, forceRefresh = false) => {
+    const reqId = ++activeRequestId.current;
     setLoading(true);
     setError('');
+    // Clear data immediately so stale data from the previous month is not shown
+    setData(null);
+
     try {
-      const url = `${API}/api/analysis?month=2026-01&cutoff_hour=${cutoff}${forceRefresh ? '&refresh=true' : ''}`;
+      const url = `${API}/api/analysis?month=${encodeURIComponent(targetMonth)}&cutoff_hour=${encodeURIComponent(targetCutoff)}${forceRefresh ? '&refresh=true' : ''}`;
       const r = await fetch(url);
+      if (reqId !== activeRequestId.current) return;
+
       if (!r.ok) {
         const body = await r.json().catch(() => ({}));
         let msg = `API request failed (${r.status})`;
@@ -46,18 +77,57 @@ function App() {
         throw new Error(msg);
       }
       const json = await r.json();
+      if (reqId !== activeRequestId.current) return;
       setData(json);
     } catch (e) {
+      if (reqId !== activeRequestId.current) return;
       setError(e.message || 'Could not load Elexon data.');
       setData(null);
     } finally {
-      setLoading(false);
+      if (reqId === activeRequestId.current) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
-    load();
-  }, [cutoff]);
+    load(month, cutoff);
+    setPeriodPage(1);
+    setPeriodDayFilter('all');
+    setShowAllInTable(false);
+  }, [month, cutoff]);
+
+  // When data for a new month arrives, update selectedDay to a valid day in that month
+  useEffect(() => {
+    if (data?.daily && data.daily.length > 0) {
+      const dates = data.daily.map(d => d.date);
+      if (!dates.includes(selectedDay)) {
+        const mid = dates.find(d => d.endsWith('-15')) || dates[0];
+        setSelectedDay(mid);
+      }
+    }
+  }, [data, selectedDay]);
+
+  const monthName = useMemo(() => {
+    const cur = data?.month || month;
+    const parts = cur.split('-').map(Number);
+    if (parts.length === 2 && parts[0] && parts[1]) {
+      const d = new Date(Date.UTC(parts[0], parts[1] - 1, 1));
+      return d.toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+    }
+    return cur;
+  }, [data?.month, month]);
+
+  const dataWindowText = useMemo(() => {
+    if (data?.daily && data.daily.length > 0) {
+      const firstDate = data.daily[0].date;
+      const lastDate = data.daily[data.daily.length - 1].date;
+      const fDay = firstDate.split('-')[2];
+      const lDay = lastDate.split('-')[2];
+      return `${fDay}–${lDay} ${monthName}`;
+    }
+    return monthName;
+  }, [data?.daily, monthName]);
 
   const rows = data?.rows || [];
   const paired = useMemo(() => rows.filter(r => r.actualMW != null && r.forecastMW != null), [rows]);
@@ -110,14 +180,15 @@ function App() {
 
   const exportCsv = () => {
     if (!rows.length) return;
+    const curMonth = data?.month || month;
     const meta = [
       `# Wind Procurement Intelligence - Forecast Accuracy Backtest`,
-      `# Delivery Month: ${data?.month || '2026-01'}`,
+      `# Delivery Month: ${curMonth}`,
       `# Decision Cutoff: ${data?.cutoffHourLondon ?? cutoff}:00 Europe/London on D-1`,
       `# Data Source: ${data?.source || 'Elexon BMRS Insights API'}`,
       `# Generated At: ${data?.generatedAt || new Date().toISOString()}`,
       `# Accuracy Metrics: MAE=${data?.metrics?.maeMW != null ? data.metrics.maeMW.toFixed(2) : '—'} MW | RMSE=${data?.metrics?.rmseMW != null ? data.metrics.rmseMW.toFixed(2) : '—'} MW | Bias=${data?.metrics?.biasMW != null ? data.metrics.biasMW.toFixed(2) : '—'} MW | WAPE=${data?.metrics?.wapePercent != null ? data.metrics.wapePercent.toFixed(2) : '—'}%`,
-      `# Matched Coverage: ${data?.counts?.pairedPeriods ?? 1488} / ${data?.counts?.expectedPeriods ?? 1488} settlement periods (100%)`,
+      `# Matched Coverage: ${data?.counts?.pairedPeriods ?? rows.length} / ${data?.counts?.expectedPeriods ?? rows.length} settlement periods`,
     ];
     const cols = [
       'startTimeUtc',
@@ -147,7 +218,7 @@ function App() {
     const url = URL.createObjectURL(new Blob([csvContent], { type: 'text/csv;charset=utf-8;' }));
     const a = document.createElement('a');
     a.href = url;
-    a.download = `wind-forecast-accuracy-${data?.month || '2026-01'}-cutoff-${data?.cutoffHourLondon ?? cutoff}h.csv`;
+    a.download = `wind-forecast-accuracy-${curMonth}-cutoff-${data?.cutoffHourLondon ?? cutoff}h.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -188,10 +259,10 @@ function App() {
 
       <main className="main">
         <header className="topbar">
-          <div className="breadcrumb">Markets <span>/</span> Wind procurement <span>/</span> <b>January 2026</b></div>
+          <div className="breadcrumb">Markets <span>/</span> Wind procurement <span>/</span> <b>{monthName}</b></div>
           <div className="top-actions">
             <div className="period-pill"><span className="status-dot" /> Historical backtest</div>
-            <button className="icon-button" title="Force live refresh from Elexon" onClick={() => load(true)}>
+            <button className="icon-button" title="Force live refresh from Elexon" onClick={() => load(month, cutoff, true)}>
               <RefreshCw size={16} />
             </button>
             <div className="avatar">PD</div>
@@ -207,8 +278,10 @@ function App() {
             </div>
             <div className="heading-controls">
               <label>DELIVERY MONTH
-                <select value="2026-01" disabled>
-                  <option>2026-01</option>
+                <select value={month} onChange={e => setMonth(e.target.value)}>
+                  {supportedMonths.map(m => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
                 </select>
               </label>
               <label>DECISION CUTOFF
@@ -229,13 +302,13 @@ function App() {
             <div className="error-banner">
               <b>Unable to load live data</b>
               <span>{error}</span>
-              <button onClick={() => load(true)}>Retry</button>
+              <button onClick={() => load(month, cutoff, true)}>Retry</button>
             </div>
           )}
 
           {loading && (
             <div className="loading-banner">
-              <span className="spinner" /> Retrieving January 2026 records from Elexon BMRS…
+              <span className="spinner" /> Retrieving {monthName} records from Elexon BMRS…
             </div>
           )}
 
@@ -280,7 +353,7 @@ function App() {
             <section className="panel periods-panel">
               <div className="panel-title">
                 <div>
-                  <h2>January settlement periods</h2>
+                  <h2>{monthName} settlement periods</h2>
                   <p>Complete historical backtest: latest forecast available at {cutoff.padStart(2, '0')}:00 UK cutoff on D-1 vs actual generation.</p>
                 </div>
                 <div className="table-controls-top">
@@ -338,10 +411,10 @@ function App() {
                   {periodDayFilter !== 'all' ? (
                     <span>Showing all 48 settlement periods for {dateLabel(periodDayFilter)}</span>
                   ) : showAllInTable ? (
-                    <span>Showing all 1,488 settlement periods for January 2026</span>
+                    <span>Showing all {fmt(rows.length)} settlement periods for {monthName}</span>
                   ) : (
                     <span>
-                      Showing settlement periods {(periodPage - 1) * 48 + 1}–{Math.min(periodPage * 48, rows.length)} of {rows.length} ({dateLabel(daysList[periodPage - 1] || '2026-01-01')})
+                      Showing settlement periods {(periodPage - 1) * 48 + 1}–{Math.min(periodPage * 48, rows.length)} of {rows.length} ({dateLabel(daysList[periodPage - 1] || `${month}-01`)})
                     </span>
                   )}
                 </div>
@@ -369,7 +442,7 @@ function App() {
                       className="toggle-all-button"
                       onClick={() => setShowAllInTable(v => !v)}
                     >
-                      {showAllInTable ? 'Show Paginated (48/day)' : 'Show All 1,488 Rows'}
+                      {showAllInTable ? 'Show Paginated (48/day)' : `Show All ${fmt(rows.length)} Rows`}
                     </button>
                   </div>
                 )}
@@ -406,8 +479,8 @@ function App() {
                   icon={<CalendarDays size={17} />}
                   label="Matched periods"
                   value={fmt(data?.counts?.pairedPeriods)}
-                  unit="/ 1,488"
-                  detail="January half-hours with both values"
+                  unit={`/ ${fmt(data?.counts?.expectedPeriods ?? rows.length ?? 1488)}`}
+                  detail={`${monthName} half-hours with both values`}
                   tone="green"
                 />
               </div>
@@ -581,7 +654,7 @@ function App() {
 
           <footer className="page-footer">
             <span>Northstar Energy Intelligence <b>·</b> Pilot build</span>
-            <span>Data window: 01–31 Jan 2026 <b>·</b> Europe/London decision clock</span>
+            <span>Data window: {dataWindowText} <b>·</b> Europe/London decision clock</span>
             <span>For analytical demonstration only</span>
           </footer>
         </div>

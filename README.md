@@ -154,7 +154,7 @@ docker compose exec backend pytest -v
 pytest backend/tests -v
 ```
 
-**Test Execution Result:** `16 passed in 0.41s`.
+**Test Execution Result:** `21 passed in 0.39s`.
 
 ---
 
@@ -162,14 +162,24 @@ pytest backend/tests -v
 
 ### `GET /api/health`
 Returns service operational status.
-- **Response:** `{"status": "ok", "service": "wind-procurement-intelligence", "cache_entries": 1}`
+- **Response:** `{"status": "ok", "service": "wind-procurement-intelligence"}`
+
+### `GET /api/supported-months`
+Returns the list of delivery months supported by this service.
+- **Response:**
+  ```json
+  {
+    "supportedMonths": ["2025-10", "2025-11", "2025-12", "2026-01", "2026-02", "2026-03"],
+    "defaultMonth": "2026-01"
+  }
+  ```
 
 ### `GET /api/analysis`
-Fetches and computes forecast accuracy and settlement period details.
+Fetches and computes forecast accuracy and settlement period details for the selected delivery month.
 
 | Query Parameter | Type | Default | Description |
 |---|---|---|---|
-| `delivery_month` | string | `2026-01` | Delivery target month (`YYYY-MM`). |
+| `month` | string | `2026-01` | Delivery target month (`YYYY-MM`). Must be in supported months list. |
 | `cutoff_hour` | integer | `10` | Decision cutoff hour on $D-1$ in `Europe/London` (0–23). |
 | `refresh` | boolean | `false` | If `true`, bypasses cache and re-fetches from Elexon BMRS. |
 
